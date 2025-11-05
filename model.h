@@ -26,6 +26,9 @@ enum SDVersion {
     VERSION_SD1_TINY_UNET,
     VERSION_SD2,
     VERSION_SD2_INPAINT,
+    ////
+    VERSION_SD2_MARIGOLD,
+    ////
     VERSION_SDXL,
     VERSION_SDXL_INPAINT,
     VERSION_SDXL_PIX2PIX,
@@ -52,7 +55,10 @@ static inline bool sd_version_is_sd1(SDVersion version) {
 }
 
 static inline bool sd_version_is_sd2(SDVersion version) {
-    if (version == VERSION_SD2 || version == VERSION_SD2_INPAINT) {
+    ////
+    // if (version == VERSION_SD2 || version == VERSION_SD2_INPAINT) {
+    if (version == VERSION_SD2 || version == VERSION_SD2_INPAINT || version == VERSION_SD2_MARIGOLD) {
+    ////
         return true;
     }
     return false;
@@ -124,7 +130,10 @@ static inline bool sd_version_is_dit(SDVersion version) {
 }
 
 static inline bool sd_version_is_unet_edit(SDVersion version) {
-    return version == VERSION_SD1_PIX2PIX || version == VERSION_SDXL_PIX2PIX;
+    ////
+    // return version == VERSION_SD1_PIX2PIX || version == VERSION_SDXL_PIX2PIX;
+    return version == VERSION_SD1_PIX2PIX || version == VERSION_SDXL_PIX2PIX || version == VERSION_SD2_MARIGOLD;
+    ////
 }
 
 static inline bool sd_version_is_control(SDVersion version) {
