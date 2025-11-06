@@ -25,6 +25,7 @@ const char* model_version_to_str[] = {
     "SD 2.x Inpaint",
     ////
     "SD 2.x Marigold 1.1",
+    "SD 2.x Marigold IID 1.1",
     ////
     "SDXL",
     "SDXL Inpaint",
@@ -273,9 +274,13 @@ public:
         version = model_loader.get_sd_version();
 
         ////
-        if (strstr(sd_ctx_params->model_path, "marigold")) {
+        if (strstr(sd_ctx_params->model_path, "marigold-depth") || strstr(sd_ctx_params->model_path, "marigold-normals")) {
             version = VERSION_SD2_MARIGOLD;
             LOG_INFO("Detected Marigold model");
+        }
+        else if (strstr(sd_ctx_params->model_path, "marigold-iid")) {
+            version = VERSION_SD2_MARIGOLD_IID;
+            LOG_INFO("Detected Marigold IID model");
         }
         ////
 
@@ -742,9 +747,7 @@ public:
                 // check is_using_v_parameterization_for_sd2
                 ////
                 // if (is_using_v_parameterization_for_sd2(ctx, sd_version_is_inpaint(version))) {
-                //     is_using_v_parameterization = true;
-                // }
-                if (version == VERSION_SD2_MARIGOLD) {
+                if (version == VERSION_SD2_MARIGOLD || version == VERSION_SD2_MARIGOLD_IID || is_using_v_parameterization_for_sd2(ctx, sd_version_is_inpaint(version))) {
                     is_using_v_parameterization = true;
                 }
                 ////
@@ -2501,7 +2504,11 @@ __STATIC_INLINE__ void ggml_ext_tensor_normalize_channels_inplace(struct ggml_te
 }
 
 ggml_tensor* sample_marigold(sd_ctx_t* sd_ctx, ggml_context* work_ctx, ggml_tensor* init_latent, int num_inference_steps) {
-    struct ggml_tensor* pred_latent = ggml_dup_tensor(work_ctx, init_latent);
+    int W = init_latent->ne[0];
+    int H = init_latent->ne[1];
+    int C = init_latent->ne[2];
+    int add = sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID ? 4 : 0;
+    struct ggml_tensor* pred_latent = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C + add, 1);
     ggml_ext_im_set_randn_f32(pred_latent, sd_ctx->sd->rng);
 
     ConditionerParams condition_params;
@@ -2513,13 +2520,13 @@ ggml_tensor* sample_marigold(sd_ctx_t* sd_ctx, ggml_context* work_ctx, ggml_tens
     condition_params.zero_out_masked = false;
     condition_params.adm_in_channels = sd_ctx->sd->diffusion_model->get_adm_in_channels();
     condition_params.num_input_imgs = 0;
-
     SDCondition cond = sd_ctx->sd->cond_stage_model->get_learned_condition(work_ctx, sd_ctx->sd->n_threads, condition_params);
+
     float eta = 0.f;
-    struct ggml_tensor* x = init_latent;
+    struct ggml_tensor* x = sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID ? pred_latent : init_latent;
     struct ggml_tensor* noised_input = ggml_dup_tensor(work_ctx, x);
     struct ggml_tensor* denoised = ggml_dup_tensor(work_ctx, x);
-    struct ggml_tensor* out_cond     = ggml_dup_tensor(work_ctx, x);
+    struct ggml_tensor* out_cond = ggml_dup_tensor(work_ctx, x);
 
     auto denoise = [&](ggml_tensor* input, float sigma, int step) -> ggml_tensor* {
         std::vector<float> scaling = sd_ctx->sd->denoiser->get_scalings(sigma);
@@ -2527,8 +2534,8 @@ ggml_tensor* sample_marigold(sd_ctx_t* sd_ctx, ggml_context* work_ctx, ggml_tens
         float c_skip = scaling[0];
         float c_out  = scaling[1];
         float c_in   = scaling[2];
-
         float t = sd_ctx->sd->denoiser->sigma_to_t(sigma);
+
         std::vector<float> timesteps_vec;
         timesteps_vec.assign(1, t);
         timesteps_vec  = sd_ctx->sd->process_timesteps(timesteps_vec, init_latent, nullptr);
@@ -2537,10 +2544,7 @@ ggml_tensor* sample_marigold(sd_ctx_t* sd_ctx, ggml_context* work_ctx, ggml_tens
         copy_ggml_tensor(noised_input, input);
         ggml_ext_tensor_scale_inplace(noised_input, c_in);
 
-        int W = init_latent->ne[0];
-        int H = init_latent->ne[1];
-        int C = init_latent->ne[2];
-        ggml_tensor* latent = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C * 2, 1);
+        ggml_tensor* latent = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C + C + add, 1);
         for (int i3 = 0; i3 < latent->ne[3]; i3++) {
             for (int i2 = 0; i2 < C; i2++) {
                 for (int i1 = 0; i1 < H; i1++) {
@@ -2552,7 +2556,7 @@ ggml_tensor* sample_marigold(sd_ctx_t* sd_ctx, ggml_context* work_ctx, ggml_tens
             }
         }
         for (int i3 = 0; i3 < latent->ne[3]; i3++) {
-            for (int i2 = 0; i2 < C; i2++) {
+            for (int i2 = 0; i2 < C + add; i2++) {
                 for (int i1 = 0; i1 < H; i1++) {
                     for (int i0 = 0; i0 < W; i0++) {
                         float val = ggml_ext_tensor_get_f32(noised_input, i0, i1, i2, i3);
@@ -2588,10 +2592,8 @@ ggml_tensor* sample_marigold(sd_ctx_t* sd_ctx, ggml_context* work_ctx, ggml_tens
         return denoised;
     };
 
-    int sample_steps = 10;
-    std::vector<float> sigmas = sd_ctx->sd->denoiser->get_sigmas(sample_steps);
+    std::vector<float> sigmas = sd_ctx->sd->denoiser->get_sigmas(num_inference_steps);
     sample_k_diffusion(DDIM_TRAILING, denoise, work_ctx, pred_latent, sigmas, sd_ctx->sd->rng, eta);
-
     return pred_latent;
 }
 
@@ -2601,9 +2603,37 @@ sd_image_t* generate_image_marigold(sd_ctx_t* sd_ctx, const sd_img_gen_params_t*
 
     ggml_tensor* image_latent = sd_ctx->sd->encode_first_stage(work_ctx, image);
     ggml_tensor* pred_latent = sample_marigold(sd_ctx, work_ctx, image_latent, sd_img_gen_params->sample_params.sample_steps);
-    ggml_tensor* output = sd_ctx->sd->decode_first_stage(work_ctx, pred_latent);
+    ggml_tensor* output;
 
-    // ggml_ext_tensor_normalize_channels_inplace(output, 1e-6f);
+    if (sd_ctx->sd->version == VERSION_SD2_MARIGOLD) {
+        output = sd_ctx->sd->decode_first_stage(work_ctx, pred_latent);
+        // ggml_ext_tensor_normalize_channels_inplace(output, 1e-6f);
+    }
+    else {
+        int W = pred_latent->ne[0];
+        int H = pred_latent->ne[1];
+        int CB = pred_latent->nb[2];
+        bool is_roughness = !strcmp(sd_img_gen_params->prompt, "_roughness");
+        ggml_tensor* view = ggml_view_3d(work_ctx, pred_latent, W, H, 4, pred_latent->nb[1], CB, is_roughness ? 4 * CB : 0);
+        output = sd_ctx->sd->decode_first_stage(work_ctx, view);
+
+        if (is_roughness) {
+            ggml_tensor* roughness = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W * 8, H * 8, 3, 1);
+            int img_W = output->ne[0];
+            int img_H = output->ne[1];
+            for (int i3 = 0; i3 < roughness->ne[3]; i3++) {
+                for (int i1 = 0; i1 < img_H; i1++) {
+                    for (int i0 = 0; i0 < img_W; i0++) {
+                        float roughness_val = ggml_ext_tensor_get_f32(output, i0, i1, 0, i3);
+                        ggml_ext_tensor_set_f32(roughness, roughness_val, i0, i1, 0, i3);
+                        ggml_ext_tensor_set_f32(roughness, roughness_val, i0, i1, 1, i3);
+                        ggml_ext_tensor_set_f32(roughness, roughness_val, i0, i1, 2, i3);
+                    }
+                }
+            }
+            output = roughness;
+        }
+    }
 
     sd_image_t* result = (sd_image_t*)calloc(1, sizeof(sd_image_t));
     result->width = sd_img_gen_params->width;
@@ -2668,7 +2698,7 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     std::vector<float> sigmas = sd_ctx->sd->denoiser->get_sigmas(sample_steps);
 
     ////
-    if (sd_ctx->sd->version == VERSION_SD2_MARIGOLD) {
+    if (sd_ctx->sd->version == VERSION_SD2_MARIGOLD || sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID) {
         return generate_image_marigold(sd_ctx, sd_img_gen_params, work_ctx);
     }
     ////

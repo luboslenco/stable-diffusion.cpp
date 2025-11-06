@@ -192,6 +192,15 @@ public:
             num_head_channels     = 64;
             num_heads             = -1;
             use_linear_projection = true;
+            ////
+            if (version == VERSION_SD2_MARIGOLD) {
+                in_channels = 8;
+            }
+            else if (version == VERSION_SD2_MARIGOLD_IID) {
+                in_channels = 12;
+                out_channels = 8;
+            }
+            ////
         } else if (sd_version_is_sdxl(version)) {
             context_dim           = 2048;
             attention_resolutions = {4, 2};
