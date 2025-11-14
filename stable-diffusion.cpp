@@ -25,7 +25,8 @@ const char* model_version_to_str[] = {
     "SD 2.x Inpaint",
     ////
     "SD 2.x Marigold 1.1",
-    "SD 2.x Marigold IID 1.1",
+    "SD 2.x Marigold IID Appearance 1.1",
+    "SD 2.x Marigold IID Lighting 1.1",
     ////
     "SDXL",
     "SDXL Inpaint",
@@ -278,9 +279,13 @@ public:
             version = VERSION_SD2_MARIGOLD;
             LOG_INFO("Detected Marigold model");
         }
-        else if (strstr(sd_ctx_params->model_path, "marigold-iid")) {
-            version = VERSION_SD2_MARIGOLD_IID;
-            LOG_INFO("Detected Marigold IID model");
+        else if (strstr(sd_ctx_params->model_path, "marigold-iid-appearance")) {
+            version = VERSION_SD2_MARIGOLD_IID_APPEARANCE;
+            LOG_INFO("Detected Marigold IID Appearance model");
+        }
+        else if (strstr(sd_ctx_params->model_path, "marigold-iid-lighting")) {
+            version = VERSION_SD2_MARIGOLD_IID_LIGHTING;
+            LOG_INFO("Detected Marigold IID Lighting model");
         }
         ////
 
@@ -747,7 +752,7 @@ public:
                 // check is_using_v_parameterization_for_sd2
                 ////
                 // if (is_using_v_parameterization_for_sd2(ctx, sd_version_is_inpaint(version))) {
-                if (version == VERSION_SD2_MARIGOLD || version == VERSION_SD2_MARIGOLD_IID || is_using_v_parameterization_for_sd2(ctx, sd_version_is_inpaint(version))) {
+                if (version == VERSION_SD2_MARIGOLD || version == VERSION_SD2_MARIGOLD_IID_APPEARANCE || version == VERSION_SD2_MARIGOLD_IID_LIGHTING || is_using_v_parameterization_for_sd2(ctx, sd_version_is_inpaint(version))) {
                     is_using_v_parameterization = true;
                 }
                 ////
@@ -2507,7 +2512,7 @@ ggml_tensor* sample_marigold(sd_ctx_t* sd_ctx, ggml_context* work_ctx, ggml_tens
     int W = init_latent->ne[0];
     int H = init_latent->ne[1];
     int C = init_latent->ne[2];
-    int add = sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID ? 4 : 0;
+    int add = sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_LIGHTING ? 8 : sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_APPEARANCE ? 4 : 0;
     struct ggml_tensor* pred_latent = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C + add, 1);
     ggml_ext_im_set_randn_f32(pred_latent, sd_ctx->sd->rng);
 
@@ -2523,7 +2528,7 @@ ggml_tensor* sample_marigold(sd_ctx_t* sd_ctx, ggml_context* work_ctx, ggml_tens
     SDCondition cond = sd_ctx->sd->cond_stage_model->get_learned_condition(work_ctx, sd_ctx->sd->n_threads, condition_params);
 
     float eta = 0.f;
-    struct ggml_tensor* x = sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID ? pred_latent : init_latent;
+    struct ggml_tensor* x = (sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_APPEARANCE || sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_LIGHTING) ? pred_latent : init_latent;
     struct ggml_tensor* noised_input = ggml_dup_tensor(work_ctx, x);
     struct ggml_tensor* denoised = ggml_dup_tensor(work_ctx, x);
     struct ggml_tensor* out_cond = ggml_dup_tensor(work_ctx, x);
@@ -2613,8 +2618,9 @@ sd_image_t* generate_image_marigold(sd_ctx_t* sd_ctx, const sd_img_gen_params_t*
         int W = pred_latent->ne[0];
         int H = pred_latent->ne[1];
         int CB = pred_latent->nb[2];
-        bool is_roughness = !strcmp(sd_img_gen_params->prompt, "_roughness");
-        ggml_tensor* view = ggml_view_3d(work_ctx, pred_latent, W, H, 4, pred_latent->nb[1], CB, is_roughness ? 4 * CB : 0);
+        bool is_roughness = strcmp(sd_img_gen_params->prompt, "_roughness") == 0;
+        bool is_diffuse_shading = strcmp(sd_img_gen_params->prompt, "_diffuse_shading") == 0;
+        ggml_tensor* view = ggml_view_3d(work_ctx, pred_latent, W, H, 4, pred_latent->nb[1], CB, (is_roughness || is_diffuse_shading) ? 4 * CB : 0);
         output = sd_ctx->sd->decode_first_stage(work_ctx, view);
 
         if (is_roughness) {
@@ -2698,7 +2704,7 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     std::vector<float> sigmas = sd_ctx->sd->denoiser->get_sigmas(sample_steps);
 
     ////
-    if (sd_ctx->sd->version == VERSION_SD2_MARIGOLD || sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID) {
+    if (sd_ctx->sd->version == VERSION_SD2_MARIGOLD || sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_APPEARANCE || sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_LIGHTING) {
         return generate_image_marigold(sd_ctx, sd_img_gen_params, work_ctx);
     }
     ////
