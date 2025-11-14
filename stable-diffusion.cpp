@@ -2482,7 +2482,7 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
 
 ////
 
-__STATIC_INLINE__ void ggml_ext_tensor_normalize_channels_inplace(struct ggml_tensor* src, float eps) {
+__STATIC_INLINE__ void ggml_ext_tensor_normalize_channels_inplace(struct ggml_tensor* src) {
     GGML_ASSERT(src->ne[2] == 3 && src->type == GGML_TYPE_F32);
     for (int y = 0; y < src->ne[1]; y++) {
         for (int x = 0; x < src->ne[0]; x++) {
@@ -2492,8 +2492,8 @@ __STATIC_INLINE__ void ggml_ext_tensor_normalize_channels_inplace(struct ggml_te
             r = 2.0f * r - 1.0f;
             g = 2.0f * g - 1.0f;
             b = 2.0f * b - 1.0f;
-            float l2 = sqrtf(r * r + g * g + b * b + eps);
-            if (l2 > eps) {
+            float l2 = sqrtf(r * r + g * g + b * b + 1e-6f);
+            if (l2 > 1e-6f) {
                 r /= l2;
                 g /= l2;
                 b /= l2;
@@ -2501,6 +2501,23 @@ __STATIC_INLINE__ void ggml_ext_tensor_normalize_channels_inplace(struct ggml_te
             r = (r + 1.0f) / 2.0f;
             g = (g + 1.0f) / 2.0f;
             b = (b + 1.0f) / 2.0f;
+            ggml_ext_tensor_set_f32(src, r, x, y, 0, 0);
+            ggml_ext_tensor_set_f32(src, g, x, y, 1, 0);
+            ggml_ext_tensor_set_f32(src, b, x, y, 2, 0);
+        }
+    }
+}
+
+__STATIC_INLINE__ void ggml_ext_tensor_invert_channels_inplace(struct ggml_tensor* src) {
+    GGML_ASSERT(src->ne[2] == 3 && src->type == GGML_TYPE_F32);
+    for (int y = 0; y < src->ne[1]; y++) {
+        for (int x = 0; x < src->ne[0]; x++) {
+            float r = ggml_ext_tensor_get_f32(src, x, y, 0, 0);
+            float g = ggml_ext_tensor_get_f32(src, x, y, 1, 0);
+            float b = ggml_ext_tensor_get_f32(src, x, y, 2, 0);
+            r = 1.0f - r;
+            g = 1.0f - g;
+            b = 1.0f - b;
             ggml_ext_tensor_set_f32(src, r, x, y, 0, 0);
             ggml_ext_tensor_set_f32(src, g, x, y, 1, 0);
             ggml_ext_tensor_set_f32(src, b, x, y, 2, 0);
@@ -2612,7 +2629,12 @@ sd_image_t* generate_image_marigold(sd_ctx_t* sd_ctx, const sd_img_gen_params_t*
 
     if (sd_ctx->sd->version == VERSION_SD2_MARIGOLD) {
         output = sd_ctx->sd->decode_first_stage(work_ctx, pred_latent);
-        // ggml_ext_tensor_normalize_channels_inplace(output, 1e-6f);
+        if (strcmp(sd_img_gen_params->prompt, "_height") == 0) {
+            ggml_ext_tensor_invert_channels_inplace(output);
+        }
+        else if (strcmp(sd_img_gen_params->prompt, "_normals") == 0) {
+            ggml_ext_tensor_normalize_channels_inplace(output);
+        }
     }
     else {
         int W = pred_latent->ne[0];
