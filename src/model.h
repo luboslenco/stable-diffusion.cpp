@@ -28,6 +28,11 @@ enum SDVersion {
     VERSION_SD2,
     VERSION_SD2_INPAINT,
     VERSION_SD2_TINY_UNET,
+    ////
+    VERSION_SD2_MARIGOLD,
+    VERSION_SD2_MARIGOLD_IID_APPEARANCE,
+    VERSION_SD2_MARIGOLD_IID_LIGHTING,
+    ////
     VERSION_SDXS,
     VERSION_SDXL,
     VERSION_SDXL_INPAINT,
@@ -60,7 +65,10 @@ static inline bool sd_version_is_sd1(SDVersion version) {
 }
 
 static inline bool sd_version_is_sd2(SDVersion version) {
-    if (version == VERSION_SD2 || version == VERSION_SD2_INPAINT || version == VERSION_SD2_TINY_UNET) {
+    ////
+    // if (version == VERSION_SD2 || version == VERSION_SD2_INPAINT || version == VERSION_SD2_TINY_UNET) {
+    if (version == VERSION_SD2 || version == VERSION_SD2_INPAINT || version == VERSION_SD2_TINY_UNET || version == VERSION_SD2_MARIGOLD  || version == VERSION_SD2_MARIGOLD_IID_APPEARANCE || version == VERSION_SD2_MARIGOLD_IID_LIGHTING) {
+    ////
         return true;
     }
     return false;

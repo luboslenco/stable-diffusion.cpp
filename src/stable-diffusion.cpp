@@ -31,6 +31,11 @@ const char* model_version_to_str[] = {
     "SD 2.x",
     "SD 2.x Inpaint",
     "SD 2.x Tiny UNet",
+    ////
+    "SD 2.x Marigold 1.1",
+    "SD 2.x Marigold IID Appearance 1.1",
+    "SD 2.x Marigold IID Lighting 1.1",
+    ////
     "SDXS",
     "SDXL",
     "SDXL Inpaint",
@@ -329,6 +334,22 @@ public:
         model_loader.convert_tensors_name();
 
         version = model_loader.get_sd_version();
+
+        ////
+        if (strstr(sd_ctx_params->model_path, "marigold-depth") || strstr(sd_ctx_params->model_path, "marigold-normals")) {
+            version = VERSION_SD2_MARIGOLD;
+            LOG_INFO("Detected Marigold model");
+        }
+        else if (strstr(sd_ctx_params->model_path, "marigold-iid-appearance")) {
+            version = VERSION_SD2_MARIGOLD_IID_APPEARANCE;
+            LOG_INFO("Detected Marigold IID Appearance model");
+        }
+        else if (strstr(sd_ctx_params->model_path, "marigold-iid-lighting")) {
+            version = VERSION_SD2_MARIGOLD_IID_LIGHTING;
+            LOG_INFO("Detected Marigold IID Lighting model");
+        }
+        ////
+
         if (version == VERSION_COUNT) {
             LOG_ERROR("get sd version from file failed: '%s'", SAFE_STR(sd_ctx_params->model_path));
             return false;
@@ -886,7 +907,10 @@ public:
             if (pred_type == PREDICTION_COUNT) {
                 if (sd_version_is_sd2(version)) {
                     // check is_using_v_parameterization_for_sd2
-                    if (is_using_v_parameterization_for_sd2(ctx, sd_version_is_inpaint(version))) {
+                    ////
+                    // if (is_using_v_parameterization_for_sd2(ctx, sd_version_is_inpaint(version))) {
+                    if (version == VERSION_SD2_MARIGOLD || version == VERSION_SD2_MARIGOLD_IID_APPEARANCE || version == VERSION_SD2_MARIGOLD_IID_LIGHTING || is_using_v_parameterization_for_sd2(ctx, sd_version_is_inpaint(version))) {
+                    ////
                         pred_type = V_PRED;
                     } else {
                         pred_type = EPS_PRED;
@@ -3207,6 +3231,203 @@ enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx, enum sample_me
     return DISCRETE_SCHEDULER;
 }
 
+////
+
+__STATIC_INLINE__ void ggml_ext_tensor_normalize_channels_inplace(struct ggml_tensor* src) {
+    GGML_ASSERT(src->ne[2] == 3 && src->type == GGML_TYPE_F32);
+    for (int y = 0; y < src->ne[1]; y++) {
+        for (int x = 0; x < src->ne[0]; x++) {
+            float r = ggml_ext_tensor_get_f32(src, x, y, 0, 0);
+            float g = ggml_ext_tensor_get_f32(src, x, y, 1, 0);
+            float b = ggml_ext_tensor_get_f32(src, x, y, 2, 0);
+            r = 2.0f * r - 1.0f;
+            g = 2.0f * g - 1.0f;
+            b = 2.0f * b - 1.0f;
+            float l2 = sqrtf(r * r + g * g + b * b + 1e-6f);
+            if (l2 > 1e-6f) {
+                r /= l2;
+                g /= l2;
+                b /= l2;
+            }
+            r = (r + 1.0f) / 2.0f;
+            g = (g + 1.0f) / 2.0f;
+            b = (b + 1.0f) / 2.0f;
+            ggml_ext_tensor_set_f32(src, r, x, y, 0, 0);
+            ggml_ext_tensor_set_f32(src, g, x, y, 1, 0);
+            ggml_ext_tensor_set_f32(src, b, x, y, 2, 0);
+        }
+    }
+}
+
+__STATIC_INLINE__ void ggml_ext_tensor_invert_channels_inplace(struct ggml_tensor* src) {
+    GGML_ASSERT(src->ne[2] == 3 && src->type == GGML_TYPE_F32);
+    for (int y = 0; y < src->ne[1]; y++) {
+        for (int x = 0; x < src->ne[0]; x++) {
+            float r = ggml_ext_tensor_get_f32(src, x, y, 0, 0);
+            float g = ggml_ext_tensor_get_f32(src, x, y, 1, 0);
+            float b = ggml_ext_tensor_get_f32(src, x, y, 2, 0);
+            r = 1.0f - r;
+            g = 1.0f - g;
+            b = 1.0f - b;
+            ggml_ext_tensor_set_f32(src, r, x, y, 0, 0);
+            ggml_ext_tensor_set_f32(src, g, x, y, 1, 0);
+            ggml_ext_tensor_set_f32(src, b, x, y, 2, 0);
+        }
+    }
+}
+
+ggml_tensor* sample_marigold(sd_ctx_t* sd_ctx, ggml_context* work_ctx, ggml_tensor* init_latent, int num_inference_steps, const sd_img_gen_params_t* sd_img_gen_params) {
+    int W = init_latent->ne[0];
+    int H = init_latent->ne[1];
+    int C = init_latent->ne[2];
+    int add = sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_LIGHTING ? 8 : sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_APPEARANCE ? 4 : 0;
+    struct ggml_tensor* pred_latent = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C + add, 1);
+    ggml_ext_im_set_randn_f32(pred_latent, sd_ctx->sd->rng);
+
+    ConditionerParams condition_params;
+    condition_params.text = "";
+    condition_params.clip_skip = -1;
+    condition_params.width = init_latent->ne[0] * sd_ctx->sd->get_vae_scale_factor();
+    condition_params.height = init_latent->ne[1] * sd_ctx->sd->get_vae_scale_factor();
+    condition_params.ref_images = {};
+    condition_params.zero_out_masked = false;
+    condition_params.adm_in_channels = sd_ctx->sd->diffusion_model->get_adm_in_channels();
+    condition_params.num_input_imgs = 0;
+    SDCondition cond = sd_ctx->sd->cond_stage_model->get_learned_condition(work_ctx, sd_ctx->sd->n_threads, condition_params);
+
+    float eta = 0.f;
+    struct ggml_tensor* x = (sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_APPEARANCE || sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_LIGHTING) ? pred_latent : init_latent;
+    struct ggml_tensor* noised_input = ggml_dup_tensor(work_ctx, x);
+    struct ggml_tensor* denoised = ggml_dup_tensor(work_ctx, x);
+    struct ggml_tensor* out_cond = ggml_dup_tensor(work_ctx, x);
+
+    auto denoise = [&](ggml_tensor* input, float sigma, int step) -> ggml_tensor* {
+        std::vector<float> scaling = sd_ctx->sd->denoiser->get_scalings(sigma);
+        GGML_ASSERT(scaling.size() == 3);
+        float c_skip = scaling[0];
+        float c_out  = scaling[1];
+        float c_in   = scaling[2];
+        float t = sd_ctx->sd->denoiser->sigma_to_t(sigma);
+
+        std::vector<float> timesteps_vec;
+        timesteps_vec.assign(1, t);
+        timesteps_vec  = sd_ctx->sd->process_timesteps(timesteps_vec, init_latent, nullptr);
+        auto timesteps = vector_to_ggml_tensor(work_ctx, timesteps_vec);
+
+        copy_ggml_tensor(noised_input, input);
+        ggml_ext_tensor_scale_inplace(noised_input, c_in);
+
+        ggml_tensor* latent = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C + C + add, 1);
+        for (int i3 = 0; i3 < latent->ne[3]; i3++) {
+            for (int i2 = 0; i2 < C; i2++) {
+                for (int i1 = 0; i1 < H; i1++) {
+                    for (int i0 = 0; i0 < W; i0++) {
+                        float val = ggml_ext_tensor_get_f32(init_latent, i0, i1, i2, i3);
+                        ggml_ext_tensor_set_f32(latent, val, i0, i1, i2, i3);
+                    }
+                }
+            }
+        }
+        for (int i3 = 0; i3 < latent->ne[3]; i3++) {
+            for (int i2 = 0; i2 < C + add; i2++) {
+                for (int i1 = 0; i1 < H; i1++) {
+                    for (int i0 = 0; i0 < W; i0++) {
+                        float val = ggml_ext_tensor_get_f32(noised_input, i0, i1, i2, i3);
+                        ggml_ext_tensor_set_f32(latent, val, i0, i1, i2 + C, i3);
+                    }
+                }
+            }
+        }
+
+        DiffusionParams diffusion_params;
+        diffusion_params.x = latent;
+        diffusion_params.timesteps = timesteps;
+        diffusion_params.context = cond.c_crossattn;
+        diffusion_params.y = cond.c_vector;
+        diffusion_params.c_concat = cond.c_concat;
+        diffusion_params.controls = {};
+        diffusion_params.control_strength = 0.f;
+        diffusion_params.ref_latents = {};
+        diffusion_params.increase_ref_index = false;
+        diffusion_params.vace_context = nullptr;
+        diffusion_params.vace_strength = 0.f;
+        diffusion_params.guidance = nullptr;
+        sd_ctx->sd->diffusion_model->compute(sd_ctx->sd->n_threads, diffusion_params, &out_cond);
+
+        float* vec_denoised  = (float*)denoised->data;
+        float* vec_input     = (float*)input->data;
+        float* positive_data = (float*)out_cond->data;
+        int ne_elements      = (int)ggml_nelements(denoised);
+        for (int i = 0; i < ne_elements; i++) {
+            float latent_result = positive_data[i];
+            vec_denoised[i] = latent_result * c_out + vec_input[i] * c_skip;
+        }
+        return denoised;
+    };
+
+
+    std::vector<float> sigmas = sd_ctx->sd->denoiser->get_sigmas(num_inference_steps, sd_ctx->sd->get_image_seq_len(sd_img_gen_params->height, sd_img_gen_params->width),
+                                                                 sd_img_gen_params->sample_params.scheduler, sd_ctx->sd->version);
+
+    sample_k_diffusion(DDIM_TRAILING_SAMPLE_METHOD, denoise, work_ctx, pred_latent, sigmas, sd_ctx->sd->rng, eta);
+    return pred_latent;
+}
+
+sd_image_t* generate_image_marigold(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_gen_params, struct ggml_context* work_ctx) {
+    ggml_tensor* image = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, sd_img_gen_params->width, sd_img_gen_params->height, 3, 1);
+    sd_image_to_ggml_tensor(sd_img_gen_params->init_image, image);
+
+    ggml_tensor* image_latent = sd_ctx->sd->encode_first_stage(work_ctx, image);
+    ggml_tensor* pred_latent = sample_marigold(sd_ctx, work_ctx, image_latent, sd_img_gen_params->sample_params.sample_steps, sd_img_gen_params);
+    ggml_tensor* output;
+
+    if (sd_ctx->sd->version == VERSION_SD2_MARIGOLD) {
+        output = sd_ctx->sd->decode_first_stage(work_ctx, pred_latent);
+        if (strcmp(sd_img_gen_params->prompt, "_height") == 0) {
+            ggml_ext_tensor_invert_channels_inplace(output);
+        }
+        else if (strcmp(sd_img_gen_params->prompt, "_normals") == 0) {
+            ggml_ext_tensor_normalize_channels_inplace(output);
+        }
+    }
+    else {
+        int W = pred_latent->ne[0];
+        int H = pred_latent->ne[1];
+        int CB = pred_latent->nb[2];
+        bool is_roughness = strcmp(sd_img_gen_params->prompt, "_roughness") == 0;
+        bool is_diffuse_shading = strcmp(sd_img_gen_params->prompt, "_diffuse_shading") == 0;
+        ggml_tensor* view = ggml_view_3d(work_ctx, pred_latent, W, H, 4, pred_latent->nb[1], CB, (is_roughness || is_diffuse_shading) ? 4 * CB : 0);
+        output = sd_ctx->sd->decode_first_stage(work_ctx, view);
+
+        if (is_roughness) {
+            ggml_tensor* roughness = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W * 8, H * 8, 3, 1);
+            int img_W = output->ne[0];
+            int img_H = output->ne[1];
+            for (int i3 = 0; i3 < roughness->ne[3]; i3++) {
+                for (int i1 = 0; i1 < img_H; i1++) {
+                    for (int i0 = 0; i0 < img_W; i0++) {
+                        float roughness_val = ggml_ext_tensor_get_f32(output, i0, i1, 0, i3);
+                        ggml_ext_tensor_set_f32(roughness, roughness_val, i0, i1, 0, i3);
+                        ggml_ext_tensor_set_f32(roughness, roughness_val, i0, i1, 1, i3);
+                        ggml_ext_tensor_set_f32(roughness, roughness_val, i0, i1, 2, i3);
+                    }
+                }
+            }
+            output = roughness;
+        }
+    }
+
+    sd_image_t* result = (sd_image_t*)calloc(1, sizeof(sd_image_t));
+    result->width = sd_img_gen_params->width;
+    result->height = sd_img_gen_params->height;
+    result->channel = 3;
+    result->data = ggml_tensor_to_sd_image(output);
+    ggml_free(work_ctx);
+    return result;
+}
+
+////
+
 sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     struct ggml_context* work_ctx,
                                     ggml_tensor* init_latent,
@@ -3556,6 +3777,12 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
                                                   scheduler,
                                                   sd_ctx->sd->version);
     }
+
+    ////
+    if (sd_ctx->sd->version == VERSION_SD2_MARIGOLD || sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_APPEARANCE || sd_ctx->sd->version == VERSION_SD2_MARIGOLD_IID_LIGHTING) {
+        return generate_image_marigold(sd_ctx, sd_img_gen_params, work_ctx);
+    }
+    ////
 
     ggml_tensor* init_latent   = nullptr;
     ggml_tensor* concat_latent = nullptr;
